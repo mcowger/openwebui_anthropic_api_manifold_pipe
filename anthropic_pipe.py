@@ -1777,7 +1777,7 @@ class Pipe:
             
             # Thinking mode state
             is_model_thinking = False
-            thinking_message = ""
+            thinking_block_start_pos = 0  # Position in final_message where current thinking block started
             thinking_blocks = []  # Preserve thinking blocks for multi-turn
             current_thinking_block = {}  # Track current thinking block
             
@@ -1948,11 +1948,13 @@ class Pipe:
                                     chunk += content_block.text or ""
                                 if content_type == "thinking":
                                     is_model_thinking = True
-                                    thinking_message = "\n<details>\n<summary>🧠 Thoughts</summary>\n\n"
+                                    # Track where this thinking block starts in final_message
+                                    thinking_block_start_pos = len(final_text())
                                     current_thinking_block = {
                                         "type": "thinking",
                                         "thinking": "",
                                     }
+                                    # No header - just stream raw thinking text, wrap on completion
                                     await emit_event_local(
                                         {
                                             "type": "status",
@@ -2228,12 +2230,17 @@ class Pipe:
                                     delta_type = getattr(delta, "type", None)
                                     if delta_type == "thinking_delta":
                                         thinking_text = getattr(delta, "thinking", "")
-                                        thinking_message += thinking_text
                                         # Preserve thinking for API
                                         if current_thinking_block:
                                             current_thinking_block[
                                                 "thinking"
                                             ] += thinking_text
+                                        # Stream raw thinking text (will be wrapped on block completion)
+                                        await self.emit_message_delta(
+                                            thinking_text,
+                                            final_message,
+                                            __event_emitter__,
+                                        )
                                     elif delta_type == "signature_delta":
                                         # Capture signature for thinking block preservation
                                         signature = getattr(delta, "signature", "")
@@ -2518,7 +2525,6 @@ class Pipe:
                                     tools_buffer = ""
 
                                 if is_model_thinking:
-                                    thinking_message += "\n</details>"
                                     # Preserve thinking block for multi-turn (API auto-filters)
                                     if (
                                         current_thinking_block
@@ -2528,12 +2534,38 @@ class Pipe:
                                         logger.debug(
                                             f"Preserved thinking block with {len(current_thinking_block.get('thinking', ''))} chars"
                                         )
-                                    # Send closing tag to complete the details block
-                                    await self.emit_message_delta(
-                                        thinking_message,
-                                        final_message,
-                                        __event_emitter__,
+                                    
+                                    # Thinking block complete - wrap with details/summary via message:replace
+                                    current_content = final_text()
+                                    
+                                    # Extract the thinking block content using tracked start position
+                                    before_thinking = current_content[:thinking_block_start_pos]
+                                    thinking_content = current_content[thinking_block_start_pos:]
+                                    
+                                    # Build wrapped version
+                                    wrapped_thinking = (
+                                        "\n<details>\n<summary>🧠 Thoughts</summary>\n\n"
+                                        + thinking_content
+                                        + "\n</details>\n"
                                     )
+                                    
+                                    # Replace entire message with wrapped version
+                                    new_content = before_thinking + wrapped_thinking
+                                    
+                                    # Update final_message tracking
+                                    final_message.clear()
+                                    final_message.append(new_content)
+                                    
+                                    # Emit replace event to update UI
+                                    await emit_event_local(
+                                        {
+                                            "type": "replace",
+                                            "data": {
+                                                "content": new_content
+                                            },
+                                        }
+                                    )
+                                    
                                     is_model_thinking = False
                                     current_thinking_block = {}
 
